@@ -116,22 +116,48 @@ final class EnvelopeIndexResolver {
         LEFT JOIN addresses a ON m.sender = a.ROWID
         WHERE m.deleted = 0
           AND lower(trim(mgd.message_id_header, '<>')) = lower('\(escapedID)')
-        ORDER BY m.date_received DESC
-        LIMIT 2;
+        ORDER BY m.date_received DESC, m.ROWID DESC
+        LIMIT 20;
         """
 
         let data = try runSQLite(databaseURL: databaseURL, query: query)
         let matches = try JSONDecoder().decode([IndexedMailMessage].self, from: data)
-        guard let match = matches.first else {
+        guard let match = Self.preferredMatch(among: matches) else {
             throw EnvelopeIndexError.messageNotFound
-        }
-        guard matches.count == 1 else {
-            throw EnvelopeIndexError.ambiguousMessageID(matches.count)
         }
         guard match.mailboxLocation != nil else {
             throw EnvelopeIndexError.invalidMailboxURL(match.mailboxURL)
         }
         return match
+    }
+
+    /// Chooses one copy when a message is stored in several mailboxes, as with
+    /// Gmail labels alongside All Mail, or a message sent to oneself. A copy in an
+    /// ordinary mailbox wins over All Mail, which wins over Trash and Junk. Ties
+    /// keep the query order, newest first.
+    static func preferredMatch(among matches: [IndexedMailMessage]) -> IndexedMailMessage? {
+        matches.enumerated().min { lhs, rhs in
+            (rank(lhs.element), lhs.offset) < (rank(rhs.element), rhs.offset)
+        }?.element
+    }
+
+    private static func rank(_ message: IndexedMailMessage) -> Int {
+        guard let location = message.mailboxLocation else {
+            return 3
+        }
+        // Mailbox names are matched in English only; other names rank as ordinary.
+        let leafName = location.path
+            .split(separator: "/")
+            .last
+            .map { $0.lowercased() } ?? ""
+        switch leafName {
+        case "all mail":
+            return 1
+        case "trash", "bin", "deleted messages", "junk", "spam":
+            return 2
+        default:
+            return 0
+        }
     }
 
     private func envelopeIndexURL() throws -> URL {
@@ -198,7 +224,6 @@ enum EnvelopeIndexError: LocalizedError {
     case unsupportedSchema([String])
     case sqliteFailure(String)
     case messageNotFound
-    case ambiguousMessageID(Int)
     case invalidMailboxURL(String)
 
     var diagnosticCode: String {
@@ -208,7 +233,6 @@ enum EnvelopeIndexError: LocalizedError {
         case .unsupportedSchema: "unsupported-index-schema"
         case .sqliteFailure: "sqlite-failure"
         case .messageNotFound: "message-not-found"
-        case .ambiguousMessageID: "ambiguous-message-id"
         case .invalidMailboxURL: "invalid-mailbox-url"
         }
     }
@@ -225,8 +249,6 @@ enum EnvelopeIndexError: LocalizedError {
             return "MailReveal could not query Mail’s local index: \(message)"
         case .messageNotFound:
             return "MailReveal could not find this Message-ID in Mail’s local index."
-        case let .ambiguousMessageID(count):
-            return "MailReveal found \(count) local messages with this Message-ID and refused to guess."
         case let .invalidMailboxURL(url):
             return "MailReveal could not understand the indexed mailbox location: \(url)"
         }

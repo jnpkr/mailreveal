@@ -66,14 +66,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         logger.notice("conversation-selection-route=\(selectionRoute.rawValue, privacy: .public)")
         logPhase("conversation-row-ready", since: receivedAt)
-        if selectionRoute == .conversation {
-            try automation.selectMessage(
-                libraryID: indexed.libraryID,
-                expectedMessageID: indexed.messageID,
-                viewerID: mailContext.viewerID
-            )
-            logPhase("conversation-child-selected", since: receivedAt)
-        }
+        // The row match is by subject, so it can land on another message with the
+        // same subject. Selecting by library ID verifies the Message-ID on every
+        // route, and picks the child once a conversation is expanded.
+        try automation.selectMessage(
+            libraryID: indexed.libraryID,
+            expectedMessageID: indexed.messageID,
+            viewerID: mailContext.viewerID
+        )
+        logPhase("message-selected", since: receivedAt)
         try accessibility.raiseViewer(viewerID: mailContext.viewerID)
         logger.notice("Mail selected the linked message")
     }
