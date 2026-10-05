@@ -9,7 +9,6 @@ struct MessageLinkTests {
         let link = try MessageLink(url: #require(URL(string: "message://%3Cabc%40example.com%3E")))
 
         #expect(link.messageID == "abc@example.com")
-        #expect(try link.mailURL.absoluteString == "message://%3Cabc%40example.com%3E")
     }
 
     @Test("Parses the single-slash form")

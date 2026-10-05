@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let processStartedAt = DispatchTime.now().uptimeNanoseconds
     private var receivedURLs = false
     private var pendingURLs: [(url: URL, receivedAt: UInt64)] = []
-    private var isProcessing = false
+    private var processingTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -24,58 +24,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let receivedAt = DispatchTime.now().uptimeNanoseconds
         logger.notice("phase=url-received")
         pendingURLs.append(contentsOf: urls.map { ($0, receivedAt) })
-        processNextURL()
+
+        // Links which arrive while one is being revealed join the queue and are
+        // drained by the running task.
+        guard processingTask == nil else { return }
+        processingTask = Task { [weak self] in
+            await self?.processPendingURLs()
+            NSApp.terminate(nil)
+        }
     }
 
-    private func processNextURL() {
-        guard !isProcessing else { return }
-        guard !pendingURLs.isEmpty else {
-            NSApp.terminate(nil)
-            return
-        }
-
-        isProcessing = true
-        let pendingURL = pendingURLs.removeFirst()
-
-        do {
-            let messageLink = try MessageLink(url: pendingURL.url)
-            logPhase("url-parsed", since: pendingURL.receivedAt)
-            let accessibility = try MailAccessibility()
-            logPhase("accessibility-ready", since: pendingURL.receivedAt)
-            let automation = try MailAutomation()
-            logPhase("automation-ready", since: pendingURL.receivedAt)
-            let mailContext = try accessibility.context()
-            logPhase("mail-context-ready", since: pendingURL.receivedAt)
-            let indexed = try EnvelopeIndexResolver().resolve(messageID: messageLink.messageID)
-            logPhase("index-resolution-complete", since: pendingURL.receivedAt)
-            try automation.positionIndexedMessage(indexed, viewerID: mailContext.viewerID)
-            logPhase("conversation-positioned", since: pendingURL.receivedAt)
-
-            let resolved = ResolvedMailMessage(indexedMessage: indexed)
-            let selectionRoute = try accessibility.selectConversation(
-                resolved,
-                viewerID: mailContext.viewerID
-            )
-            logger.notice("conversation-selection-route=\(selectionRoute.rawValue, privacy: .public)")
-            logPhase("conversation-row-ready", since: pendingURL.receivedAt)
-            if selectionRoute == .conversation {
-                try automation.selectMessage(
-                    libraryID: indexed.libraryID,
-                    expectedMessageID: indexed.messageID,
-                    viewerID: mailContext.viewerID
-                )
-                logPhase("conversation-child-selected", since: pendingURL.receivedAt)
+    private func processPendingURLs() async {
+        while !pendingURLs.isEmpty {
+            let pendingURL = pendingURLs.removeFirst()
+            do {
+                try reveal(pendingURL.url, receivedAt: pendingURL.receivedAt)
+            } catch {
+                await handleFailure(error, url: pendingURL.url)
             }
-            try accessibility.raiseViewer(viewerID: mailContext.viewerID)
-            logger.notice("Mail selected the linked message")
-
-            isProcessing = false
-            processNextURL()
-        } catch {
-            report(error)
-            isProcessing = false
-            processNextURL()
         }
+    }
+
+    private func reveal(_ url: URL, receivedAt: UInt64) throws {
+        let messageLink = try MessageLink(url: url)
+        logPhase("url-parsed", since: receivedAt)
+        let accessibility = try MailAccessibility()
+        logPhase("accessibility-ready", since: receivedAt)
+        let automation = try MailAutomation()
+        logPhase("automation-ready", since: receivedAt)
+        let mailContext = try accessibility.context()
+        logPhase("mail-context-ready", since: receivedAt)
+        let indexed = try EnvelopeIndexResolver().resolve(messageID: messageLink.messageID)
+        logPhase("index-resolution-complete", since: receivedAt)
+        try automation.positionIndexedMessage(indexed, viewerID: mailContext.viewerID)
+        logPhase("conversation-positioned", since: receivedAt)
+
+        let selectionRoute = try accessibility.selectConversation(
+            subject: indexed.subject,
+            viewerID: mailContext.viewerID
+        )
+        logger.notice("conversation-selection-route=\(selectionRoute.rawValue, privacy: .public)")
+        logPhase("conversation-row-ready", since: receivedAt)
+        // The row match is by subject, so it can land on another message with the
+        // same subject. Selecting by library ID verifies the Message-ID on every
+        // route, and picks the child once a conversation is expanded.
+        try automation.selectMessage(
+            libraryID: indexed.libraryID,
+            expectedMessageID: indexed.messageID,
+            viewerID: mailContext.viewerID
+        )
+        logPhase("message-selected", since: receivedAt)
+        try accessibility.raiseViewer(viewerID: mailContext.viewerID)
+        logger.notice("Mail selected the linked message")
     }
 
     private func logPhase(_ phase: String, since start: UInt64) {
@@ -84,6 +84,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logger.notice(
             "phase=\(phase, privacy: .public) elapsed_ms=\(elapsedMilliseconds, privacy: .public)"
         )
+    }
+
+    private func handleFailure(_ error: Error, url: URL) async {
+        report(error)
+
+        // A malformed link means nothing to Mail either. Anything else is handed
+        // to Mail so the link still opens, in Mail's own message window.
+        let fallsBackToMail = !(error is MessageLinkError)
+        showAlert(for: error, fallsBackToMail: fallsBackToMail)
+        if fallsBackToMail {
+            await openInMail(url)
+        }
+    }
+
+    private func showAlert(for error: Error, fallsBackToMail: Bool) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = fallsBackToMail
+            ? "MailReveal could not select the message in your viewer"
+            : "MailReveal could not open this link"
+        var informativeText = error.localizedDescription
+        if fallsBackToMail {
+            informativeText += "\n\nMail will open the message in its own window instead."
+        }
+        alert.informativeText = informativeText
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private func openInMail(_ url: URL) async {
+        guard let mailURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.apple.mail"
+        ) else {
+            logger.error("MailReveal fallback failed code=mail-not-found")
+            return
+        }
+
+        do {
+            _ = try await NSWorkspace.shared.open(
+                [url],
+                withApplicationAt: mailURL,
+                configuration: NSWorkspace.OpenConfiguration()
+            )
+            logger.notice("Handed the link to Mail")
+        } catch {
+            logger.error("MailReveal fallback failed code=mail-open-failed")
+        }
     }
 
     private func report(_ error: Error) {

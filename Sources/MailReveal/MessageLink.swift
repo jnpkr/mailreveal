@@ -51,24 +51,6 @@ struct MessageLink: Equatable {
 
         self.messageID = messageID
     }
-
-    var mailURL: URL {
-        get throws {
-            var allowedCharacters = CharacterSet.alphanumerics
-            allowedCharacters.insert(charactersIn: "-._~")
-
-            guard
-                let encodedMessageID = "<\(messageID)>".addingPercentEncoding(
-                    withAllowedCharacters: allowedCharacters
-                ),
-                let url = URL(string: "message://\(encodedMessageID)")
-            else {
-                throw MessageLinkError.invalidMessageID
-            }
-
-            return url
-        }
-    }
 }
 
 enum MessageLinkError: LocalizedError {
