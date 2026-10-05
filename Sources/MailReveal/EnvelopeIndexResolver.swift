@@ -221,7 +221,6 @@ final class EnvelopeIndexResolver {
 enum EnvelopeIndexError: LocalizedError {
     case mailDataUnavailable(String)
     case envelopeIndexNotFound
-    case unsupportedSchema([String])
     case sqliteFailure(String)
     case messageNotFound
     case invalidMailboxURL(String)
@@ -230,7 +229,6 @@ enum EnvelopeIndexError: LocalizedError {
         switch self {
         case .mailDataUnavailable: "mail-data-unavailable"
         case .envelopeIndexNotFound: "envelope-index-not-found"
-        case .unsupportedSchema: "unsupported-index-schema"
         case .sqliteFailure: "sqlite-failure"
         case .messageNotFound: "message-not-found"
         case .invalidMailboxURL: "invalid-mailbox-url"
@@ -243,8 +241,6 @@ enum EnvelopeIndexError: LocalizedError {
             return "MailReveal could not read Mail’s local index: \(message)"
         case .envelopeIndexNotFound:
             return "MailReveal could not find Mail’s Envelope Index."
-        case let .unsupportedSchema(columns):
-            return "MailReveal does not recognise this Mail index schema (messages columns: \(columns.joined(separator: ", ")))."
         case let .sqliteFailure(message):
             return "MailReveal could not query Mail’s local index: \(message)"
         case .messageNotFound:

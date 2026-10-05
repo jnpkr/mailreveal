@@ -21,14 +21,8 @@ private func mailSelectionObserverCallback(
     CFRunLoopStop(signal.runLoop)
 }
 
-struct ResolvedMailWindow {
-    let message: ResolvedMailMessage
-    fileprivate let element: AXUIElement
-}
-
 struct MailContext: Equatable {
     let viewerID: Int
-    let windowIdentifiers: Set<String>
 }
 
 enum ConversationSelectionRoute: String {
@@ -64,9 +58,6 @@ final class MailAccessibility {
 
     func context() throws -> MailContext {
         let windows: [AXUIElement] = attribute(kAXWindowsAttribute, from: applicationElement) ?? []
-        let windowIdentifiers = Set(windows.compactMap {
-            attribute(kAXIdentifierAttribute, from: $0) as String?
-        })
 
         for window in windows where findElement(
             in: window,
@@ -78,97 +69,22 @@ final class MailAccessibility {
             else {
                 continue
             }
-            return MailContext(
-                viewerID: viewerID,
-                windowIdentifiers: windowIdentifiers
-            )
+            return MailContext(viewerID: viewerID)
         }
 
         throw MailAccessibilityError.viewerNotFound
     }
 
-    func waitForResolvedMessage(
-        excluding knownWindowIdentifiers: Set<String>,
-        timeout: TimeInterval = 2
-    ) throws -> ResolvedMailWindow {
-        let deadline = Date().addingTimeInterval(timeout)
-
-        repeat {
-            let windows: [AXUIElement] =
-                attribute(kAXWindowsAttribute, from: applicationElement) ?? []
-            for window in windows {
-                guard
-                    let identifier: String = attribute(kAXIdentifierAttribute, from: window),
-                    identifier.hasPrefix("Mail.messageViewer.window."),
-                    !knownWindowIdentifiers.contains(identifier),
-                    let resolved = resolvedMessage(in: window)
-                else {
-                    continue
-                }
-                return ResolvedMailWindow(message: resolved, element: window)
-            }
-
-            if
-                let focusedWindow: AXUIElement = attribute(
-                    kAXFocusedWindowAttribute,
-                    from: applicationElement
-                ),
-                let identifier: String = attribute(
-                    kAXIdentifierAttribute,
-                    from: focusedWindow
-                ),
-                identifier.hasPrefix("Mail.messageViewer.window."),
-                findElement(in: focusedWindow, identifier: "Mail.messageList") == nil,
-                let resolved = resolvedMessage(in: focusedWindow)
-            {
-                // Mail may reuse a standalone window which existed before this
-                // request. The focused resolver is still the right window even
-                // though its identifier was present in the initial snapshot.
-                return ResolvedMailWindow(message: resolved, element: focusedWindow)
-            }
-            Thread.sleep(forTimeInterval: 0.02)
-        } while Date() < deadline
-
-        throw MailAccessibilityError.resolvedWindowNotFound
-    }
-
-    func close(_ resolvedWindow: ResolvedMailWindow) throws {
-        let deadline = Date().addingTimeInterval(0.4)
-        repeat {
-            if
-                let closeButton: AXUIElement = attribute(
-                    kAXCloseButtonAttribute,
-                    from: resolvedWindow.element
-                ),
-                AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success
-            {
-                return
-            }
-            Thread.sleep(forTimeInterval: 0.02)
-        } while Date() < deadline
-
-        throw MailAccessibilityError.couldNotCloseResolvedWindow
-    }
-
-    func raise(_ resolvedWindow: ResolvedMailWindow) throws {
-        guard AXUIElementPerformAction(
-            resolvedWindow.element,
-            kAXRaiseAction as CFString
-        ) == .success else {
-            throw MailAccessibilityError.couldNotRaiseResolvedWindow
-        }
-    }
-
     func selectConversation(
-        _ message: ResolvedMailMessage,
+        subject: String,
         viewerID: Int
     ) throws -> ConversationSelectionRoute {
-        guard !message.subject.isEmpty else {
+        guard !subject.isEmpty else {
             throw MailAccessibilityError.missingSubject
         }
 
         guard let row = try waitForSelectedTargetRow(
-            subject: message.subject,
+            subject: subject,
             viewerID: viewerID,
             timeout: 0.45
         ) else {
@@ -209,10 +125,6 @@ final class MailAccessibility {
             }
         }
         return .conversation
-    }
-
-    func focusMessage(_ message: ResolvedMailMessage, viewerID: Int) throws {
-        try focus(message, viewerID: viewerID)
     }
 
     func raiseViewer(viewerID: Int) throws {
@@ -300,74 +212,6 @@ final class MailAccessibility {
         return nil
     }
 
-    private func focus(_ message: ResolvedMailMessage, viewerID: Int) throws {
-        guard let viewer = viewerElement(viewerID: viewerID) else {
-            throw MailAccessibilityError.viewerNotFound
-        }
-
-        let deadline = Date().addingTimeInterval(1.2)
-        repeat {
-            let candidates = findElements(in: viewer, identifier: "message_view")
-            if let target = candidates.first(where: { matches(message, in: $0) }) {
-                if scrollToVisible(target) {
-                    return
-                }
-                throw MailAccessibilityError.couldNotRevealMessage
-            }
-            Thread.sleep(forTimeInterval: 0.02)
-        } while Date() < deadline
-
-        throw MailAccessibilityError.resolvedMessageNotVisible
-    }
-
-    private func matches(_ message: ResolvedMailMessage, in element: AXUIElement) -> Bool {
-        guard let header = findElement(in: element, identifier: "message_header") else {
-            return false
-        }
-
-        let timestampElement = findElement(in: element, identifier: "message.timestamp")
-            ?? findElement(in: element, identifier: "message.mailbox")
-        let visibleTimestamp: String = timestampElement.flatMap {
-            attribute(kAXValueAttribute, from: $0)
-        } ?? ""
-
-        let content = MailSubject.normalized(strings(in: header).joined(separator: " "))
-        let subject = MailSubject.conversationTitle(message.subject)
-        let sender = MailSubject.normalized(message.sender)
-        let timestamp = MailSubject.normalized(message.timestamp)
-
-        return content.contains(subject)
-            && (sender.isEmpty || content.contains(sender))
-            && (timestamp.isEmpty || MailTimestamp.matches(timestamp, in: visibleTimestamp))
-    }
-
-    private func scrollToVisible(_ root: AXUIElement) -> Bool {
-        var queue: [(element: AXUIElement, depth: Int)] = [(root, 0)]
-        var queueIndex = 0
-        var visited: Set<CFHashCode> = []
-
-        while queueIndex < queue.count {
-            let (element, depth) = queue[queueIndex]
-            queueIndex += 1
-            guard depth <= 8, visited.insert(CFHash(element)).inserted else {
-                continue
-            }
-
-            if AXUIElementPerformAction(
-                element,
-                "AXScrollToVisible" as CFString
-            ) == .success {
-                return true
-            }
-
-            let children: [AXUIElement] =
-                attribute(kAXChildrenAttribute, from: element) ?? []
-            queue.append(contentsOf: children.map { ($0, depth + 1) })
-        }
-
-        return false
-    }
-
     private func select(_ row: AXUIElement, in table: AXUIElement) throws {
         let isSelected: Bool = attribute(kAXSelectedAttribute, from: row) ?? false
         if isSelected {
@@ -399,33 +243,7 @@ final class MailAccessibility {
         }
     }
 
-    private func resolvedMessage(in window: AXUIElement) -> ResolvedMailMessage? {
-        guard
-            let windowTitle: String = attribute(kAXTitleAttribute, from: window),
-            let mailboxElement = findElement(in: window, identifier: "message.mailbox"),
-            let mailboxLabel: String = attribute(kAXValueAttribute, from: mailboxElement),
-            let timestampElement = findElement(in: window, identifier: "message.timestamp"),
-            let timestamp: String = attribute(kAXValueAttribute, from: timestampElement),
-            let headerElement = findElement(in: window, identifier: "message.header.content"),
-            let senderElement = findElement(in: headerElement, identifier: "_MAIL_TEXT_ATTACHMENT"),
-            let sender: String = attribute(kAXValueAttribute, from: senderElement)
-        else {
-            return nil
-        }
-
-        return try? ResolvedMailMessage(
-            windowTitle: windowTitle,
-            mailboxLabel: mailboxLabel,
-            sender: sender,
-            timestamp: timestamp
-        )
-    }
-
-    private func findElement(
-        in root: AXUIElement,
-        identifier: String? = nil,
-        subrole: String? = nil
-    ) -> AXUIElement? {
+    private func findElement(in root: AXUIElement, identifier: String) -> AXUIElement? {
         var queue: [(element: AXUIElement, depth: Int)] = [(root, 0)]
         var queueIndex = 0
         var visited: Set<CFHashCode> = []
@@ -438,21 +256,9 @@ final class MailAccessibility {
                 continue
             }
 
-            if let identifier {
-                let candidateIdentifier: String? = attribute(
-                    kAXIdentifierAttribute,
-                    from: element
-                )
-                if candidateIdentifier == identifier {
-                    return element
-                }
-            }
-
-            if let subrole {
-                let candidateSubrole: String? = attribute(kAXSubroleAttribute, from: element)
-                if candidateSubrole == subrole {
-                    return element
-                }
+            let candidateIdentifier: String? = attribute(kAXIdentifierAttribute, from: element)
+            if candidateIdentifier == identifier {
+                return element
             }
 
             let children: [AXUIElement] =
@@ -461,36 +267,6 @@ final class MailAccessibility {
         }
 
         return nil
-    }
-
-    private func findElements(in root: AXUIElement, identifier: String) -> [AXUIElement] {
-        var matches: [AXUIElement] = []
-        var queue: [(element: AXUIElement, depth: Int)] = [(root, 0)]
-        var queueIndex = 0
-        var visited: Set<CFHashCode> = []
-
-        while queueIndex < queue.count {
-            let (element, depth) = queue[queueIndex]
-            queueIndex += 1
-            guard depth <= 12, visited.insert(CFHash(element)).inserted else {
-                continue
-            }
-
-            let candidateIdentifier: String? = attribute(
-                kAXIdentifierAttribute,
-                from: element
-            )
-            if candidateIdentifier == identifier {
-                matches.append(element)
-                continue
-            }
-
-            let children: [AXUIElement] =
-                attribute(kAXChildrenAttribute, from: element) ?? []
-            queue.append(contentsOf: children.map { ($0, depth + 1) })
-        }
-
-        return matches
     }
 
     private func strings(in root: AXUIElement) -> [String] {
@@ -549,40 +325,24 @@ enum MailAccessibilityError: LocalizedError {
     case permissionRequired
     case mailIsNotRunning
     case missingSubject
-    case resolvedWindowNotFound
-    case couldNotCloseResolvedWindow
-    case couldNotRaiseResolvedWindow
     case couldNotRaiseViewer
     case couldNotObserveSelection(AXError)
     case couldNotExpandConversation
     case viewerNotFound
-    case searchFieldNotFound
     case messageRowNotFound
-    case resolvedMessageNotVisible
-    case couldNotRevealMessage
     case couldNotSelectRow(AXError, AXError)
-    case couldNotSetSearch(AXError, AXError)
-    case couldNotConfirmSearch
 
     var diagnosticCode: String {
         switch self {
         case .permissionRequired: "accessibility-permission-required"
         case .mailIsNotRunning: "mail-not-running"
         case .missingSubject: "missing-subject"
-        case .resolvedWindowNotFound: "resolved-window-not-found"
-        case .couldNotCloseResolvedWindow: "could-not-close-resolved-window"
-        case .couldNotRaiseResolvedWindow: "could-not-raise-resolved-window"
         case .couldNotRaiseViewer: "could-not-raise-viewer"
         case .couldNotObserveSelection: "could-not-observe-selection"
         case .couldNotExpandConversation: "could-not-expand-conversation"
         case .viewerNotFound: "viewer-not-found"
-        case .searchFieldNotFound: "search-field-not-found"
         case .messageRowNotFound: "message-row-not-found"
-        case .resolvedMessageNotVisible: "resolved-message-not-visible"
-        case .couldNotRevealMessage: "could-not-reveal-message"
         case .couldNotSelectRow: "could-not-select-row"
-        case .couldNotSetSearch: "could-not-set-search"
-        case .couldNotConfirmSearch: "could-not-confirm-search"
         }
     }
 
@@ -594,12 +354,6 @@ enum MailAccessibilityError: LocalizedError {
             return "Apple Mail is not running."
         case .missingSubject:
             return "The linked message has no subject to match in Mail’s message list."
-        case .resolvedWindowNotFound:
-            return "Mail did not open the linked message."
-        case .couldNotCloseResolvedWindow:
-            return "MailReveal could not close Mail’s temporary message window."
-        case .couldNotRaiseResolvedWindow:
-            return "MailReveal could not bring Mail’s resolved message window forward."
         case .couldNotRaiseViewer:
             return "MailReveal could not bring Mail’s main message viewer forward."
         case let .couldNotObserveSelection(error):
@@ -608,20 +362,10 @@ enum MailAccessibilityError: LocalizedError {
             return "MailReveal found the conversation but could not expand it."
         case .viewerNotFound:
             return "MailReveal could not find Mail’s main message viewer."
-        case .searchFieldNotFound:
-            return "MailReveal could not find Mail’s search field."
         case .messageRowNotFound:
             return "MailReveal found the message in Mail but could not find its row in the message list."
-        case .resolvedMessageNotVisible:
-            return "Mail selected the conversation but did not display the linked message."
-        case .couldNotRevealMessage:
-            return "Mail displayed the linked message but would not scroll it into view."
         case let .couldNotSelectRow(pressError, selectionError):
             return "Mail’s message row could not be selected (\(pressError.rawValue), \(selectionError.rawValue))."
-        case let .couldNotSetSearch(valueError, focusError):
-            return "Mail’s search field could not be updated (\(valueError.rawValue), \(focusError.rawValue))."
-        case .couldNotConfirmSearch:
-            return "MailReveal could not start Mail’s message search."
         }
     }
 }

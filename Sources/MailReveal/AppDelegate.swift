@@ -59,9 +59,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try automation.positionIndexedMessage(indexed, viewerID: mailContext.viewerID)
         logPhase("conversation-positioned", since: receivedAt)
 
-        let resolved = ResolvedMailMessage(indexedMessage: indexed)
         let selectionRoute = try accessibility.selectConversation(
-            resolved,
+            subject: indexed.subject,
             viewerID: mailContext.viewerID
         )
         logger.notice("conversation-selection-route=\(selectionRoute.rawValue, privacy: .public)")

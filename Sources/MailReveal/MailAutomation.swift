@@ -18,41 +18,6 @@ final class MailAutomation {
         self.script = script
     }
 
-    func selectMailbox(
-        accountName: String,
-        mailboxName: String,
-        viewerID: Int
-    ) throws {
-        _ = try execute(
-            handler: "selectKnownMailbox",
-            arguments: [
-                accountName,
-                mailboxName,
-                String(viewerID),
-            ]
-        )
-    }
-
-    func positionCurrentMessage(
-        expectedMessageID: String,
-        viewerID: Int
-    ) throws -> Int {
-        let result = try execute(
-            handler: "positionCurrentMessage",
-            arguments: [
-                expectedMessageID,
-                String(viewerID),
-            ]
-        )
-        guard
-            let value = result.stringValue,
-            let libraryID = Int(value)
-        else {
-            throw MailAutomationError.invalidLibraryID
-        }
-        return libraryID
-    }
-
     func selectMessage(
         libraryID: Int,
         expectedMessageID: String,
@@ -143,7 +108,6 @@ final class MailAutomation {
 
 enum MailAutomationError: LocalizedError {
     case missingScript
-    case invalidLibraryID
     case invalidMailboxLocation
     case messageIDVerificationFailed
     case scriptFailure(String)
@@ -151,7 +115,6 @@ enum MailAutomationError: LocalizedError {
     var diagnosticCode: String {
         switch self {
         case .missingScript: "missing-script"
-        case .invalidLibraryID: "invalid-library-id"
         case .invalidMailboxLocation: "invalid-mailbox-location"
         case .messageIDVerificationFailed: "message-id-verification-failed"
         case .scriptFailure: "script-failure"
@@ -162,8 +125,6 @@ enum MailAutomationError: LocalizedError {
         switch self {
         case .missingScript:
             return "MailReveal’s bundled Mail automation script is missing."
-        case .invalidLibraryID:
-            return "Mail did not return the resolved message’s library ID."
         case .invalidMailboxLocation:
             return "MailReveal could not determine the indexed message’s account and mailbox."
         case .messageIDVerificationFailed:
